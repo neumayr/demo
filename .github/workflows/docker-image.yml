@@ -1,0 +1,98 @@
+name: 🐳 Docker Image
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: Build and Publish Image
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write # allows the JWT to be requested from GitHub's OIDC provider
+      contents: read # This is required for actions/checkout
+      packages: write
+      attestations: write
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # Setup & Login GitHub
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        uses: docker/metadata-action@v5
+        id: meta
+        env:
+          DOCKER_METADATA_PR_HEAD_SHA: true
+        with:
+          images: |
+            ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+
+      # Debug
+      - run: printenv | sort
+      - name: Dump GITHUB_REPOSITORY_OWNER
+        run: echo $GITHUB_REPOSITORY_OWNER
+      - name: Is tag pushed?
+        run: ${{ github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v') }}
+        continue-on-error: true
+      - name: Dump github context
+        run: echo '${{ toJSON(github) }}'
+      - name: Dump meta context
+        run: echo '${{ toJSON(steps.meta.outputs) }}'
+
+      - name: Get Short GitHub SHA and Save in Environment Variable
+        run: echo "SHORT_GITHUB_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+      - name: Get Current Date and Save in Environment Variable
+        run: echo "NOW=$(date +'%Y-%m-%dT%H:%M:%S%z')" >> $GITHUB_ENV
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        id: push
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: ${{ github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v') }}
+          sbom: ${{ github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v') }}
+          build-args: |
+            SOURCE_BRANCH=${{ github.ref_name }}
+            SOURCE_COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ env.NOW }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Generate artifact attestation
+        if: github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v')
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ github.repository }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+
+      - name: Verify OCI Image
+        if: success() && github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v')
+        run: gh attestation verify --owner ${{ github.repository_owner }} oci://ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}
+        env:
+          GH_TOKEN: ${{ github.token }}
