@@ -1,4 +1,4 @@
-name: 🔬 Test Sourcecode
+name: 🔬 Test & Lint
 
 on: push
 
